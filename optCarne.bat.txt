@@ -1,0 +1,2 @@
+@ECHO OFF
+C:\Users\BT_rcastillo\AppData\Local\Julia-1.1.0\bin\julia.exe<C:\Users\BT_rcastillo\Documents\carnes\OptimizaCarne.jl
