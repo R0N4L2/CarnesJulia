@@ -88,7 +88,7 @@ catch
     Pkg.pin(PackageSpec(name="JuMP", version="0.18.5"))
     using JuMP
 end
-function OptimoCarnes(esquema::String,option2::Bool,lam::Float64,option3::Bool,pss::Float64,tiempo::Float64,gap::Float64,tareas::Int64,conn::Array{String})
+function OptimoCarnes(esquema::String,option2::Bool,tiempo::Float64,gap::Float64,tareas::Int64,conn::Array{String})
     MPcD=EjecutarQuery(join(["select DISTINCT replace(replace(a.DSC1,'DE RES CALIDAD (',''),')','') AS TIPO,a.ITM ",
     "from ",esquema,".itt_i_maestros a, ",esquema,".itt_i_recetas b where upper(dsc1) like '%RES%' and upper(dl01) like '%MATERIA%'",
     " and a.itm=b.itm and b.rscp>0"]),conn)
@@ -115,35 +115,48 @@ function OptimoCarnes(esquema::String,option2::Bool,lam::Float64,option3::Bool,p
     pB=vcat([hcat(j,sum(pB[pB[:,1].==j,2:end],dims=1)) for j=a]...)
     pB=vcat(hcat(-ones(2,1),hcat(vcat([0:(MMP[2,j]-2) for j=1:size(MMP,2)]...),vcat([MMP[1,j]*ones(MMP[2,j]-1) for j=1:size(MMP,2)]...))'),pB) #transformacion corte\[receta,materiaprima]
     SE=convert(Array{Int},a)
-    dem=EjecutarQuery(join(["select a.drqj as fechapred,b.itm,sum(a.uorg*b.qnty*b.nvs)/100000000000 as dem_min,sum(a.uorg*b.qnty*(b.nof+10000))/100000000000",
-    " as sobre_oferta from ",esquema,".itt_i_forecast a , ",esquema,".itt_i_algoritmo b where b.kit=a.itm and b.itm in  (",string(SE)[2:end-1],
-    ") group by b.itm,a.drqj order by a.drqj"]),conn)
+    dem=EjecutarQuery(join(["select a.drqj as fechapred,b.itm,sum(a.uorg*b.qnty*b.nvs)*power(10,-12) as dem_min,sum(a.uorg*b.qnty*(b.nof+power(10,4)))*power(10,-12) as sobre_oferta from ",esquema,".itt_i_forecast a , ",esquema,".itt_i_algoritmo b where b.kit=a.itm and b.itm in  (",string(SE)[2:end-1],") and a.uorg>0 group by b.itm,a.drqj order by a.drqj"]),conn)
     if size(dem,1)>0
         dem=convert(Matrix{Float64},dem)
         MPcD=hcat(vec(convert(Array{String},MPcD.TIPO)),MateriaPrimas)
         a=unique(dem[:,1])
-        OCC=hcat([reshape([j,OptimoCorte(dem[j.==dem[:,1],2:end],pB,option2,lam,MPcD,option3,tiempo,gap,tareas,pss,esquema,conn)...],(3,1)) for j in a]...)
+        OCC=hcat([reshape([j,OptimoCorte(dem[j.==dem[:,1],2:end],pB,option2,MPcD,tiempo,gap,tareas,esquema,conn)...],(3,1)) for j in a]...)
         for n in a
-            InserTable(convert(Array{Float64},hcat(OCC[2,OCC[1,:].==n][1][2:end,[4,2]],OCC[2,OCC[1,:].==n][1][2:end,5:end])),join([esquema,".ITT_O_WO"]),n,conn)
+            if typeof(OCC[2,OCC[1,:].==n][1][1])<:Number
+                InserTable(convert(Array{Float64},hcat(OCC[2,OCC[1,:].==n][1][2:end,[4,2]],OCC[2,OCC[1,:].==n][1][2:end,5:end])),join([esquema,".ITT_O_WO"]),n,conn)
+            else
+                println(join([DtJDE2Date(Int(n))," : ",OCC[2,OCC[1,:].==n][1],"\n"]))
+            end
         end
-        OPT=vcat([OptimoProceso(OCC[3,OCC[1,:].==j][1][k,:],tiempo,gap,tareas,j,esquema,conn) for j in unique(OCC[1,:]) for k=1:size(OCC[3,OCC[1,:].==j][1],1)]...)
-        if any(OPT[:,end].>=0)
-            OPT=OPT[OPT[:,end].>=0,:]
-            a=unique(OPT[:,1])
-            OPT=convert(Array{Float64},OPT[:,[1,6,10]])
-            for n in a
-                InserTable(OPT[OPT[:,1].==n,2:3],join([esquema,".ITT_O_MPS"]),n,conn)
+        OCC=OCC[:,findall([typeof(OCC[2,OCC[1,:].==n][1][1])<:Number for n in a])]
+        if !isempty(OCC)||size(OCC,1)>0
+            OPT=vcat([OptimoProceso(OCC[3,OCC[1,:].==j][1][k,:],tiempo,gap,tareas,j,esquema,conn) for j in unique(OCC[1,:]) for k=1:size(OCC[3,OCC[1,:].==j][1],1)]...)
+            if (!isempty(OPT)||size(OPT,1)>0) && any(isa.(OPT[:,end],Number))
+                OPT1=OPT[isa.(OPT[:,end],Number),[1,6,end]]
+                OPT1=convert(Array{Float64},OPT1)
+                a=unique(OPT1[:,1])
+                for n in a
+                    InserTable(OPT1[OPT1[:,1].==n,2:3],join([esquema,".ITT_O_MPS"]),n,conn)
+                end
+            end
+            if (!isempty(OPT)||size(OPT,1)>0) && any(isa.(OPT[:,end],String))
+                OPT1=OPT[isa.(OPT[:,end],String),[1,2,3,end]]
+                for n=1:size(OPT1,1)
+                    println(join([DtJDE2Date(Int(OPT1[n,1]))," : ",OPT1[n,4]," de ",OPT1[n,2]," (codigo semielaborado:",strInt(OPT1[n,3]),")\n"]))
+                end
+            end
+            if isempty(OPT)||size(OPT,1)==0
+                println("ERROR:No existe factibilidad en ningun dia\n")
             end
         else
-            println("ERROR:Problema Infactible")
+            println("ERROR:No existe factibilidad en ningun dia\n")
         end
     else
-        println("ERROR:No existe demanda")
+        println("ERROR:No existe demanda\n")
     end
 end
 function GenMatriz(MateriaPrima::Int64,esquema::String,conn::Array{String})
-    M=convert(Matrix{Float64},EjecutarQuery(join(["select qnrc/100,kitc,rscp/10000",
-    " from ",esquema,".itt_i_recetas  where rscp>0 and itm=",string(MateriaPrima)]),conn))
+    M=convert(Matrix{Float64},EjecutarQuery(join(["select qnrc/100,kitc,rscp*power(10,-4) from ",esquema,".itt_i_recetas  where rscp>0 and itm=",string(MateriaPrima)]),conn))
     if size(M,1)>0
         a=sort(unique(M[:,2]))
         b=sort(unique(M[:,1]))
@@ -258,19 +271,19 @@ function InserTable(X::Array{Float64},table::String,fechainsert::Float64,conn::A
     end
     dsn,username,password=conn
     db=ODBC.DSN(dsn,username,password)
+    tday=string(tiempoEntero(now()))
     if split(table,".")[2]=="ITT_O_MPS"
         stmt=join(["INSERT INTO ",table," (",columnas,") VALUES ("])
         for row=1:size(X,1)
-            tday=string(tiempoEntero(now()))
-            stmt1=join([stmt,join(hcat(upmj,tday,user,fechainsert,strInt(X[row,1]),strFlt(X[row,2])),","),")"])
+            stmt1=join([stmt,join(hcat(upmj,tday,user,fechainsert,strInt(X[row,1]),strFlt(X[row,2]*10^4)),","),")"])
             try
                 ODBC.execute!(db,stmt1)
             catch
-                println(repeat("#",max(43,length(stmt1))))
-                println("No puede hacer el siguiente insert:")
-                println(stmt1)
-                println("Revise si esa data ya esta en base de datos")
-                println(repeat("-",max(43,length(stmt1))))
+                println(join([repeat("#",max(43,length(stmt1))),"\n"]))
+                println("No puede insertar la siguiente linea:\n")
+                println(join([stmt1,"\n"]))
+                println("Revise si esa data ya esta en base de datos\n")
+                println(join([repeat("-",max(43,length(stmt1))),"\n"]))
             end
         end
     else
@@ -278,17 +291,16 @@ function InserTable(X::Array{Float64},table::String,fechainsert::Float64,conn::A
             a=X[row,3:end].>0
             b=findall(a).+2
             columnas1=join([columnas,join([join(["ITM",j,",","UORG",j]) for j=1:1:sum(a)],",")],",")
-            tday=string(tiempoEntero(now()))
             stmt=join(["INSERT INTO ",table," (", columnas1,") VALUES ("])
-            stmt=join([stmt,join(hcat(strInt(contador+row-1),upmj,tday,user,fechainsert,strInt(X[row,1]),strInt(X[row,2]),hcat([hcat(strInt(X[1,j]),strFlt(X[row,j])) for j in b]...)),","),")"])
+            stmt=join([stmt,join(hcat(strInt(contador+row-1),upmj,tday,user,fechainsert,strInt(X[row,1]),strInt(X[row,2]*10^4),hcat([hcat(strInt(X[1,j]),strFlt(X[row,j]*10^4)) for j in b]...)),","),")"])
             try
                 ODBC.execute!(db,stmt)
             catch
-                println(repeat("#",max(43,length(stmt))))
-                println("No puede hacer el siguiente insert:")
-                println(stmt)
-                println("Revise si esa data ya esta en base de datos")
-                println(repeat("-",max(43,length(stmt))))
+                println(join([repeat("#",max(43,length(stmt))),"\n"]))
+                println("No puede hacer el siguiente insert:\n")
+                println(join([stmt,"\n"]))
+                println("Revise si esa data ya esta en base de datos\n")
+                println(join([repeat("-",max(43,length(stmt))),"\n"]))
             end
         end
     end
@@ -314,13 +326,12 @@ function tiempoEntero(dt::DateTime)
     return Int((hour(dt)*10^2+minute(dt))*10^2+second(dt))
 end
 function OptimoCorte(dem::Array{Float64},pB::Array{Float64},
-    option2::Bool,lam::Float64,MPcD::Array{Any},option3::Bool,
-    tiempo::Float64,gap::Float64,tareas::Int64,pss::Float64,esquema::String,conn::Array{String})
+    option2::Bool,MPcD::Array{Any},
+    tiempo::Float64,gap::Float64,tareas::Int64,esquema::String,conn::Array{String})
     if size(dem,1)>0
-        if size(dem,1)<size(pB,1)-2
-            dems=hcat(pB[3:end,1],zeros(size(pB,1)-2,2))
-            for j=1:size(dem,1) dems[dems[:,1].==dem[j,1],2:3]=dem[j,2:3] end
-            dems=vcat(-ones(2,3),dems)
+        dems=hcat(pB[3:end,1],zeros(size(pB,1)-2,2))
+        for j=1:size(dem,1)
+            dems[dems[:,1].==dem[j,1],2:3]=dem[j,2:3]
         end
         if option2
             a=findall(any!(trues(size(MPcD,1)),unique(pB[2,2:end])'.==MPcD[:,2]))
@@ -344,31 +355,28 @@ function OptimoCorte(dem::Array{Float64},pB::Array{Float64},
                     N[Int(sum(v[:,3].<=i*10+2)/2),findall(v[v[:,3].==i*10+2,2].==pB[2,:]).-1]=-ones(1,sum(v[v[:,3].==i*10+2,2].==pB[2,:]))
                 end
             end
-        else
-            dm=dems[3:end,2:3]
         end
-        dm=dems[3:end,2:3]
+        dm=dems[:,2:3]
         M=pB[3:end,2:end]
-        modele= Model(solver=CbcSolver(seconds=tiempo,ratioGap=gap,threads=tareas))
-        @variable(modele,0<=x[1:(size(pB,2)-1)]<=10000,category=:Int)
-        @variable(modele,0<=e<=10000)
+        fo=(M'*mean(dm,dims=2))
+        bl=vec((fo.>0).&(sum(M,dims=1)'.>0))
+        M=M[:,bl]
         if option2
-            @variable(modele,0<=e1<=10000)
+            N=N[:,bl]
         end
-        if option3
-            fo=sum(mean(dems[3:end,2:3],dims=2).*pB[3:end,2:end],dims=1)./sum(pB[3:end,2:end],dims=1)
+        fo=fo[bl]
+        fo=sum(M,dims=1).*fo'.^-1
+        modele= Model(solver=CbcSolver(seconds=tiempo,ratioGap=gap,threads=tareas))
+        @variable(modele,0<=x[1:(size(M,2))]<=10^5,category=:Int)
+        @variable(modele,0<=e<=10^5)
+        if option2
+            @variable(modele,0<=e1<=10^5)
         end
-        if option3 & option2
-            @objective(modele,Min,pss*(e+lam*e1)-sum(fo*x))
-        elseif option2
-            @objective(modele,Min,e+lam*e1)
-        elseif option3
-            @objective(modele,Min,pss*e-sum(fo*x))
-        else
-            @objective(modele,Min,e)
-        end
-        @constraint(modele,M*x.+e.>=dm[:,1])
+        @objective(modele,Min,sum(fo*x))
+        @constraint(modele,M*x.>=dm[:,1])
         @constraint(modele,M*x.-e.<=dm[:,2])
+        @constraint(modele,sum(M,dims=1)*x.>=.9*sum(dm[:,1:2])/2)
+        @constraint(modele,sum(M,dims=1)*x.-e.<=1.08*sum(dm[:,1:2])/2)
         if option2
             @constraint(modele,N*x.-e1.<=0)
             @constraint(modele,N*x.+e1.>=0)
@@ -394,66 +402,80 @@ function OptimoCorte(dem::Array{Float64},pB::Array{Float64},
             else
                 X="No tiene cortes optimos"
                 Y=X
+                println(join([Y,"\n"]))
             end
         else
-            X="Problema Infactible"
+            X="Problema Infactible de corte"
             Y=X
+            println(join([Y,"\n"]))
         end
     else
         X="no cortar"
         Y=X
+        println(join([Y,"\n"]))
     end
     return X,Y
 end
 function OptimoProceso(Y::Array{Any},tiempo::Float64,gap::Float64,tareas::Int64,fecha::Float64,esquema::String,conn::Array{String})
-    dem=EjecutarQuery(join(["select c.dsc1, a.itm,a.uorg*b.nvs/(b.qnty*1000) as dem_min,a.uorg*(b.nof+10000)/(b.qnty*1000) ",
-    "as sobre_oferta,10000/b.qnty as proporcion from ",esquema,".itt_i_forecast a,",
-    esquema,".itt_i_algoritmo b,",esquema,".itt_i_maestros c where b.kit=a.itm and b.itm=",
-    strInt(Y[2])," and a.drqj=",strInt(fecha)," and a.itm=c.itm"]),conn)
+    dem=EjecutarQuery(join(["select c.dsc1, a.itm,power(10,-4)*a.uorg*b.nvs/b.qnty as dem_min,power(10,-4)*a.uorg*(b.nof+power(10,4))/b.qnty as sobre_oferta,power(10,4)/b.qnty as proporcion from ",esquema,".itt_i_forecast a,",esquema,".itt_i_algoritmo b,",esquema,".itt_i_maestros c where b.kit=a.itm and b.itm=",    strInt(Y[2])," and a.drqj=",strInt(fecha)," and a.itm=c.itm and a.uorg>0"]),conn)
     if size(dem,1)>0
         dem=convert(Matrix{Any},dem)
         dm=convert(Matrix{Float64},dem[:,3:5])
         modele=Model(solver=CbcSolver(seconds=tiempo,ratioGap=gap,threads=tareas))
-        @variable(modele,0<=x[1:size(dm,1)]<=10000,category=:Int)
-        @variable(modele,0<=e<=10000)
-        M=Matrix(vcat(Diagonal(ones(size(dm,1))),reshape(dm[:,3],1,size(dm,1))))
-        @objective(modele,Min,e)
-        @constraint(modele,M*x.+e.>=vcat(dm[:,1],Y[3]))
-        @constraint(modele,M*x.-e.<=vcat(dm[:,2],Y[3]))
+        @variable(modele,0<=x[1:size(dm,1)]<=10^5,category=:Int)
+        @variable(modele,0<=e<=10^5)
+        @variable(modele,0<=e1<=10^5)
+        v=reshape(dm[:,3],1,size(dm,1))
+        @objective(modele,Min,sum(mean(dm[:,1:2],dims=2)'.^-1*x))
+        @constraint(modele,x.>=dm[:,1])
+        @constraint(modele,x.-e.<=dm[:,2])
+        @constraint(modele,v*x.+e1.>=Y[3])
+        @constraint(modele,v*x.-e1.<=Y[3])
+        @constraint(modele,sum(x)>=.9*sum(dm[:,1:2])/2)
+        @constraint(modele,sum(x)-e<=1.08*sum(dm[:,1:2])/2)
         statuse=solve(modele)
         if statuse==:Optimal
             x_value=getvalue(x)
             e_value=getvalue(e)
             dem=hcat(repeat(hcat(fecha,reshape(Y,1,prod(size(Y)))),size(dem,1),1),dem,x_value)
         else
-            dem=hcat(repeat(hcat(fecha,reshape(Y,1,prod(size(Y)))),size(dem,1),1),dem,-ones(size(dem,1)))
+            dem=hcat(repeat(hcat(fecha,reshape(Y,1,prod(size(Y)))),size(dem,1),1),dem,repeat(["Problema Infactible de producto terminado"],size(dem,1),1))
+            println("Problema Infactible de producto terminado\n")
         end
     else
-        dem=hcat(fecha,reshape(Y,1,prod(size(Y))),-ones(1,6))
+        dem=hcat(fecha,reshape(Y,1,prod(size(Y))),-ones(1,5),"No hay demanda de producto terminado")
+        println("No hay demanda de producto terminado\n")
     end
     return dem
 end
-
+function clearTable(tabla::String,conn::Array{String})
+    dsn,username,password=conn
+    db=ODBC.DSN(dsn,username,password)
+    stmt1=join(["delete from ",tabla])
+    qry=ODBC.query(db,join(["SELECT * FROM ",tabla]))
+    if size(qry,1)>0
+        ODBC.execute!(db,stmt1)
+    end
+    ODBC.disconnect!(db)
+end
 function main()
     dsn="JDE_ODBC_ORACLE"
     username="CONS_CARNICOS"
     password="C4rn1c0s"
     conn=[dsn,username,password]
     esquema="INTEGRA"
-    op2="Igualdad en brazos y piernas"
-    option2=(op2=="Igualdad en brazos y piernas")
-    #lam: peso que se le da a la restirccion de compra por cadenas
-    lam=.5
-    op3="Prioridad de demanda"
-    option3=(op3=="Prioridad de demanda")
-    #pss: peso por sobrestock
-    pss=10
-    pss=float(pss)
+    clearTable(join([esquema,".ITT_O_MPS"]),conn)
+    clearTable(join([esquema,".ITT_O_WO"]),conn)
+    option2=parse(Bool,EjecutarQuery(join(["SELECT INEV01 FROM ",esquema,".ITT_I_parametros WHERE INUKID=2"]),conn).INEV01[1])
     #parametros de optimizacion
-    tiempo=360 #segundos
-    tiempo=float(tiempo)
-    gap=.1 #taza de aproximacion al optimo
-    tareas=10 #trabajos totales en paralelo
-    OptimoCarnes(esquema,option2,lam,option3,pss,tiempo,gap,tareas,conn)
+    tiempo=float(EjecutarQuery(join(["SELECT INAA/100 as num FROM ",esquema,".ITT_I_parametros WHERE INUKID=1"]),conn).NUM[1]) #segundos
+    gap=float(EjecutarQuery(join(["SELECT INAA/100 as num FROM ",esquema,".ITT_I_parametros WHERE INUKID=6"]),conn).NUM[1]) #taza de aproximacion al optimo
+    tareas=Int(EjecutarQuery(join(["SELECT INAA/100 as num FROM ",esquema,".ITT_I_parametros WHERE INUKID=7"]),conn).NUM[1]) #trabajos totales en paralelo
+    OptimoCarnes(esquema,option2,tiempo,gap,tareas,conn)
+    println("proceso finalizado\n")
+    db=ODBC.DSN(dsn,username,password)
+    stmt1=join(["update ",esquema,".ITT_I_Control set alev01='3'"])
+    ODBC.execute!(db,stmt1)
+    ODBC.disconnect!(db)
 end
 main()
